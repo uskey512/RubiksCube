@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cube Viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1d1f23; color: #e8e8ea; font: 14px/1.5 system-ui, sans-serif; }
+  canvas { display: block; touch-action: none; }
+  #ui { position: fixed; top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+  button { background: #2e3138; color: inherit; border: 1px solid #454a54; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  button[aria-pressed="true"] { background: #3d5bd9; border-color: #3d5bd9; }
+  #stats, #help { position: fixed; bottom: 12px; opacity: .65; font-size: 12px; }
+  #stats { left: 12px; font-variant-numeric: tabular-nums; }
+  #help { right: 12px; text-align: right; }
+</style>
+</head>
+<body>
+<div id="ui"></div>
+<div id="stats"></div>
+<div id="help">ドラッグ: 視点回転 / ホイール・ピンチ: ズーム<br>U D L R F B キー: 外側の面を回す（Shift で逆回転）</div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const SIZES = [3, 4, 5, 6];
+const AXES = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
+// Clockwise as seen from outside the face: axis, outer layer (0 or n-1), quarter-turn sign.
+const FACE_MOVES = { U: ['y', 1, -1], D: ['y', 0, 1], R: ['x', 1, -1], L: ['x', 0, 1], F: ['z', 1, -1], B: ['z', 0, 1] };
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.NeutralToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1d1f23);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+const key = new THREE.DirectionalLight(0xffffff, 1.0);
+key.position.set(3, 5, 4);
+scene.add(key);
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.02, 200);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const loader = new GLTFLoader();
+const maxAniso = renderer.capabilities.getMaxAnisotropy();
+const stats = document.getElementById('stats');
+let model = null, cube = null, cubies = [], size = 0, lastMove = null;
+let queue = Promise.resolve();
+
+const enqueue = (fn) => (queue = queue.then(fn).catch((e) => { stats.textContent = String(e); }));
+
+async function load(n) {
+  stats.textContent = '読み込み中…';
+  const gltf = await loader.loadAsync(`../dist/cube_${n}x${n}.glb`);
+  if (model) scene.remove(model);
+  model = gltf.scene;
+  cube = model.getObjectByName(`Cube${n}x${n}`);
+  cubies = cube.children.filter((o) => o.userData.grid);
+  model.traverse((o) => {
+    if (!o.material) return;
+    for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap']) {
+      if (o.material[k]) o.material[k].anisotropy = maxAniso;
+    }
+  });
+  scene.add(model);
+  size = n;
+  lastMove = null;
+  camera.position.set(1, 0.85, 1.3).normalize().multiplyScalar(n * 4.2);
+  controls.target.set(0, 0, 0);
+  controls.minDistance = n * 0.5 + 0.35;
+  controls.maxDistance = n * 10;
+  for (const b of document.querySelectorAll('[data-size]')) b.setAttribute('aria-pressed', String(+b.dataset.size === n));
+}
+
+function snap(o) {
+  const off = (size - 1) / 2;
+  o.position.set(...o.position.toArray().map((v) => Math.round(v + off) - off));
+  const m = new THREE.Matrix4().makeRotationFromQuaternion(o.quaternion);
+  m.elements = m.elements.map(Math.round);
+  o.quaternion.setFromRotationMatrix(m);
+}
+
+function turn(axis, layer, quarter, ms = 220) {
+  return enqueue(() => new Promise((resolve) => {
+    const coord = layer - (size - 1) / 2;
+    const pivot = new THREE.Object3D();
+    cube.add(pivot);
+    const members = cubies.filter((c) => Math.abs(c.position[axis] - coord) < 0.25);
+    for (const c of members) pivot.attach(c);
+    const start = performance.now();
+    const step = (now) => {
+      const t = ms > 0 ? Math.min(1, (now - start) / ms) : 1;
+      const e = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+      pivot.setRotationFromAxisAngle(AXES[axis], quarter * e * Math.PI / 2);
+      if (t < 1) return requestAnimationFrame(step);
+      for (const c of members) { cube.attach(c); snap(c); }
+      cube.remove(pivot);
+      resolve();
+    };
+    if (ms > 0) requestAnimationFrame(step);
+    else step(start);
+  }));
+}
+
+function faceTurn(face, inverse, ms) {
+  const [axis, outer, quarter] = FACE_MOVES[face];
+  return turn(axis, outer ? size - 1 : 0, inverse ? -quarter : quarter, ms);
+}
+
+function shuffle() {
+  for (let i = 0; i < size * 8; i++) {
+    let move;
+    do {
+      move = { axis: 'xyz'[Math.floor(Math.random() * 3)], layer: Math.floor(Math.random() * size) };
+    } while (lastMove && move.axis === lastMove.axis && move.layer === lastMove.layer);
+    lastMove = move;
+    turn(move.axis, move.layer, Math.random() < 0.5 ? 1 : -1, 140);
+  }
+}
+
+const ui = document.getElementById('ui');
+for (const n of SIZES) {
+  const b = document.createElement('button');
+  b.textContent = `${n}×${n}`;
+  b.dataset.size = n;
+  b.onclick = () => enqueue(() => load(n));
+  ui.append(b);
+}
+for (const [label, fn] of [['シャッフル', shuffle], ['リセット', () => enqueue(() => load(size))]]) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.onclick = fn;
+  ui.append(b);
+}
+
+addEventListener('keydown', (e) => {
+  const face = e.key.toUpperCase();
+  if (FACE_MOVES[face] && !e.metaKey && !e.ctrlKey) faceTurn(face, e.shiftKey);
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+  if (cube) stats.textContent = `${size}×${size} · ${cubies.length} パーツ · ${renderer.info.render.calls} draw calls · ${renderer.info.render.triangles.toLocaleString()} 三角形`;
+});
+
+window.viewer = { turn, faceTurn, shuffle, load: (n) => enqueue(() => load(n)), get cubies() { return cubies; }, camera, controls };
+enqueue(() => load(3));
+</script>
+</body>
+</html>
