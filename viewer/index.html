@@ -294,6 +294,14 @@ addEventListener('resize', () => {
 
 renderer.setAnimationLoop(() => {
   controls.update();
+  // Fit the depth range to the cube's bounding sphere (turning layers stay inside it). With a
+  // fixed near plane, depth precision at a big cube's viewing distance gets coarser than the
+  // sticker's thickness and the body shows through the stickers.
+  const distance = camera.position.distanceTo(controls.target);
+  const radius = size * 0.87 + 0.1;
+  camera.near = Math.max(0.02, distance - radius);
+  camera.far = distance + radius;
+  camera.updateProjectionMatrix();
   renderer.render(scene, camera);
   if (cube) stats.textContent = `${size}×${size} · ${cubies.length} パーツ · ${renderer.info.render.calls} draw calls · ${renderer.info.render.triangles.toLocaleString()} 三角形`;
 });
