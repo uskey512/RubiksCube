@@ -2,6 +2,8 @@
 
 WebGL 表示用の、パーツ単位で回せるキューブモデル。
 
+ブラウザで動かす: https://uskey512.github.io/RubiksCube/viewer/
+
 | 3×3 | 6×6（レイヤー回転中） | 拡大 |
 |---|---|---|
 | ![3x3](previews/cube_3x3.webp) | ![6x6 turning](previews/cube_6x6_turning.webp) | ![3x3 close-up](previews/cube_3x3_closeup.webp) |
@@ -62,7 +64,7 @@ function turnLayer(axis, layer, quarter) {      // axis: 'x'|'y'|'z', layer: 0..
 
 ビューアは、同じジオメトリとマテリアルを使うメッシュを `InstancedMesh` にまとめて描画している。glTF のノードは非表示のままシーンに残して上のように回し、動いたフレームだけワールド行列をインスタンスに写す。メッシュごとに描くと 20×20 で 4,568 draw calls になるところが、どのサイズでも 54 以下に収まる。
 
-ビューアの起動（リポジトリのルートで実行。three.js は CDN から読み込む）:
+GitHub Pages では main ブランチのルートをそのまま配信している（`.nojekyll` で Jekyll の変換を止め、ルートの `index.html` はビューアへ転送するだけ）。手元でのビューアの起動（リポジトリのルートで実行。three.js は CDN から読み込む）:
 
 ```bash
 python3 -m http.server 8765
