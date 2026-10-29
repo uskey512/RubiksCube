@@ -6,7 +6,7 @@
 // every one is verified by simulation, so solving an orbit only ever moves that orbit.
 
 import {
-  getModel, encodeMove, decodeMove, invertMove, invertMoves, pushMove, applyMove, applyMoves, isSolved,
+  getModel, encodeMove, decodeMove, invertMove, invertMoves, pushMove, applyMove, applyMoves, isSolved, compose,
 } from './cube.js';
 import { solve3x3, cubieFromFacelets, permParity } from './kociemba.js';
 
@@ -19,15 +19,6 @@ function kociembaToMove(n, k) {
   const clockwise = KOCIEMBA_OUTER[face] ? -1 : 1;
   const q = power === 2 ? 2 : power === 1 ? clockwise : -clockwise;
   return encodeMove(n, KOCIEMBA_AXIS[face], KOCIEMBA_OUTER[face] ? n - 1 : 0, q);
-}
-
-function compose(model, ids) {
-  const comp = Int32Array.from({ length: model.size }, (_, i) => i);
-  for (const id of ids) {
-    const p = model.perms[id];
-    for (let i = 0; i < comp.length; i++) comp[i] = p[comp[i]];
-  }
-  return comp;
 }
 
 function findOrbits(model) {
@@ -118,7 +109,7 @@ function cycleEntry(model, pairs, moves) {
 
 const libraryCache = new Map();
 
-function getLibraries(model) {
+export function getLibraries(model) {
   if (libraryCache.has(model.n)) return libraryCache.get(model.n);
   const orbits = findOrbits(model);
   const orbitOf = new Map();
@@ -247,7 +238,7 @@ function bestCyclePair(lib, state, target) {
   return best;
 }
 
-function solveOrbit(model, state, target, orbit, lib, onMove) {
+export function solveOrbit(model, state, target, orbit, lib, onMove) {
   const stickers = orbit.cubies.map((c) => model.cubies[c].stickers);
   const wrong = () => stickers.filter((s) => s.some((i) => state[i] !== target[i])).length;
   let parityFixed = false;

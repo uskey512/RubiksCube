@@ -7,19 +7,33 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1d1f23; color: #e8e8ea; font: 14px/1.5 system-ui, sans-serif; }
   canvas { display: block; touch-action: none; }
-  #ui { position: fixed; top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+  #top { position: fixed; top: 12px; left: 12px; right: 12px; }
+  #ui { display: flex; flex-wrap: wrap; gap: 6px; }
   button { background: #2e3138; color: inherit; border: 1px solid #454a54; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
   button[aria-pressed="true"] { background: #3d5bd9; border-color: #3d5bd9; }
   #stats, #help { position: fixed; bottom: 12px; opacity: .65; font-size: 12px; }
   #stats { left: 12px; font-variant-numeric: tabular-nums; }
   #help { right: 12px; text-align: right; }
-  #status { position: fixed; top: 52px; left: 12px; right: 12px; font-size: 13px; opacity: .85; }
+  #status, #log { font-size: 13px; font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px #000; }
+  #status { margin-top: 8px; opacity: .85; }
+  #log { margin-top: 4px; }
+  .step { display: flex; gap: 8px; animation: step-in .25s ease-out; }
+  .step .mark { width: 1em; text-align: center; }
+  .step .name { min-width: 11.5em; }
+  .step.current { color: #9db2ff; }
+  .step.done { opacity: .6; }
+  .step.done .mark { color: #5fd38d; }
+  @keyframes step-in { from { opacity: 0; transform: translateX(-6px); } }
+  @media (prefers-reduced-motion: reduce) { .step { animation: none; } }
   button:disabled { opacity: .5; cursor: default; }
 </style>
 </head>
 <body>
-<div id="ui"></div>
-<div id="status"></div>
+<div id="top">
+  <div id="ui"></div>
+  <div id="status"></div>
+  <div id="log"></div>
+</div>
 <div id="stats"></div>
 <div id="help">ドラッグ: 視点回転 / ホイール・ピンチ: ズーム<br>U D L R F B キー: 外側の面を回す（Shift で逆回転）</div>
 <script type="importmap">
@@ -37,7 +51,16 @@ import { getModel, stickerIndex } from '../solver/cube.js';
 
 const SIZES = [3, 4, 5, 6];
 const COLOR_IDS = { white: 0, red: 1, green: 2, yellow: 3, orange: 4, blue: 5 };
-const STAGE_NAMES = { '3x3': '3x3部分', corners: 'コーナー', edges: 'エッジ', centers: 'センター' };
+const METHOD_NAMES = { computer: 'コンピューター式', human: '人の手順' };
+const STAGE_NAMES = {
+  '3x3': '3x3 部分', corners: 'コーナー', edges: 'エッジ', centers: 'センター',
+  firstCenter: 'センター（1 面目）', oppositeCenter: 'センター（反対の面）', thirdCenter: 'センター（3 面目）',
+  fourthCenter: 'センター（4 面目）', lastCenters: 'センター（残り 2 面）',
+  pairing: 'エッジのペアリング', edgeParity: 'エッジのパリティ',
+  cross: '下面のクロス', firstLayer: '1 段目のコーナー', secondLayer: '2 段目のエッジ', ollParity: 'OLL パリティ',
+  topCross: '上面のクロス', topFace: '上面の色をそろえる', topCorners: '上段コーナーの位置', pllParity: 'PLL パリティ',
+  topEdges: '上段エッジの位置',
+};
 const AXES = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
 // Clockwise as seen from outside the face: axis, outer layer (0 or n-1), quarter-turn sign.
 const FACE_MOVES = { U: ['y', 1, -1], D: ['y', 0, 1], R: ['x', 1, -1], L: ['x', 0, 1], F: ['z', 1, -1], B: ['z', 0, 1] };
@@ -63,9 +86,11 @@ const loader = new GLTFLoader();
 const maxAniso = renderer.capabilities.getMaxAnisotropy();
 const stats = document.getElementById('stats');
 const status = document.getElementById('status');
+const log = document.getElementById('log');
 let model = null, cube = null, cubies = [], size = 0, lastMove = null;
 let queue = Promise.resolve();
-let worker = null, solving = false, solveButton = null;
+let worker = null, solving = false;
+const solveButtons = [];
 
 const enqueue = (fn) => (queue = queue.then(fn).catch((e) => {
   status.textContent = `エラー: ${e.message}`;
@@ -93,6 +118,8 @@ async function load(n) {
   controls.minDistance = n * 0.5 + 0.35;
   controls.maxDistance = n * 10;
   for (const b of document.querySelectorAll('[data-size]')) b.setAttribute('aria-pressed', String(+b.dataset.size === n));
+  status.textContent = '';
+  log.textContent = '';
 }
 
 function snap(o) {
@@ -131,14 +158,18 @@ function faceTurn(face, inverse, ms) {
 }
 
 function shuffle() {
-  for (let i = 0; i < size * 8; i++) {
+  const total = size * 8;
+  enqueue(() => (log.textContent = ''));
+  for (let i = 0; i < total; i++) {
     let move;
     do {
       move = { axis: 'xyz'[Math.floor(Math.random() * 3)], layer: Math.floor(Math.random() * size) };
     } while (lastMove && move.axis === lastMove.axis && move.layer === lastMove.layer);
     lastMove = move;
+    enqueue(() => (status.textContent = `あと ${total - i} 手シャッフルします（${i + 1} / ${total}）`));
     turn(move.axis, move.layer, Math.random() < 0.5 ? 1 : -1, 140);
   }
+  enqueue(() => (status.textContent = `シャッフル完了（${total} 手）`));
 }
 
 // Sticker colors in the solver's facelet order, read from where each sticker currently is.
@@ -160,33 +191,70 @@ function readState() {
   return state;
 }
 
-function setSolving(on) {
-  solving = on;
-  if (solveButton) solveButton.disabled = on;
+// One line per stage, kept after the stage is done so the whole solve reads as a log.
+function addStep(name) {
+  const row = document.createElement('div');
+  row.className = 'step current';
+  for (const [cls, text] of [['mark', '▶'], ['name', name], ['count', '']]) {
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = text;
+    row.append(span);
+  }
+  log.append(row);
+  return row;
 }
 
-function requestSolution(n, state) {
+function setSolving(on) {
+  solving = on;
+  for (const b of solveButtons) b.disabled = on;
+}
+
+function requestSolution(n, state, method) {
   worker ??= new Worker(new URL('../solver/worker.js', import.meta.url), { type: 'module' });
   return new Promise((resolve, reject) => {
     worker.onmessage = ({ data }) => (data.error ? reject(new Error(data.error)) : resolve(data));
     worker.onerror = (e) => reject(new Error(e.message));
-    worker.postMessage({ n, state });
+    worker.postMessage({ n, state, method });
   });
 }
 
-function solve() {
+function solve(method) {
   if (solving) return;
   setSolving(true);
-  status.textContent = '解法を計算中…';
+  const label = METHOD_NAMES[method];
+  status.textContent = `${label}: 解法を計算中…`;
+  log.textContent = '';
   return enqueue(async () => {
-    const result = await requestSolution(size, readState());
+    const result = await requestSolution(size, readState(), method);
     const count = result.moves.length;
-    const detail = result.stages.filter((s) => s.moves).map((s) => `${STAGE_NAMES[s.name]} ${s.moves}`).join(' / ');
-    status.textContent = count ? `${count} 手で解きます（${detail}）· 計算 ${Math.round(result.ms)} ms` : 'もう揃っています';
-    const ms = Math.max(40, Math.min(250, 20000 / count));
-    for (const m of result.moves) turn('xyz'[m.axis], m.layer, m.q, ms);
+    const calc = `計算 ${Math.round(result.ms)} ms`;
+    status.textContent = count ? `${label}: ${count} 手 · ${calc}` : 'もう揃っています';
+    const ms = Math.max(30, Math.min(220, 30000 / count));
+    let done = 0;
+    for (const stage of result.stages) {
+      if (!stage.moves) continue;
+      // A short pause between stages makes each one easier to follow.
+      if (done) enqueue(() => new Promise((resolve) => setTimeout(resolve, 300)));
+      let row;
+      enqueue(() => (row = addStep(STAGE_NAMES[stage.name])));
+      for (let k = 1; k <= stage.moves; k++) {
+        const m = result.moves[done++];
+        const at = done;
+        enqueue(() => {
+          row.lastChild.textContent = `${k} / ${stage.moves} 手`;
+          status.textContent = `${label}: ${at} / ${count} 手 · ${calc}`;
+        });
+        turn('xyz'[m.axis], m.layer, m.q, ms);
+      }
+      enqueue(() => {
+        row.className = 'step done';
+        row.firstChild.textContent = '✓';
+        row.lastChild.textContent = `${stage.moves} 手`;
+      });
+    }
     enqueue(() => {
-      if (count) status.textContent = `完成（${count} 手）`;
+      if (count) status.textContent = `${label}: 完成（${count} 手 · ${calc}）`;
       setSolving(false);
     });
   });
@@ -200,12 +268,18 @@ for (const n of SIZES) {
   b.onclick = () => enqueue(() => load(n));
   ui.append(b);
 }
-for (const [label, fn] of [['シャッフル', shuffle], ['解く', solve], ['リセット', () => enqueue(() => load(size))]]) {
+const buttons = [
+  ['シャッフル', shuffle],
+  ['コンピューター式で解く', () => solve('computer'), true],
+  ['人の手順で解く', () => solve('human'), true],
+  ['リセット', () => enqueue(() => load(size))],
+];
+for (const [label, fn, isSolve] of buttons) {
   const b = document.createElement('button');
   b.textContent = label;
   b.onclick = fn;
   ui.append(b);
-  if (fn === solve) solveButton = b;
+  if (isSolve) solveButtons.push(b);
 }
 
 addEventListener('keydown', (e) => {

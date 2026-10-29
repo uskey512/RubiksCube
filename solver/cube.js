@@ -128,6 +128,16 @@ export function solvedState(n) {
   return Uint8Array.from({ length: size }, (_, i) => face[i]);
 }
 
+// Where each sticker ends up after the moves: comp[i] is the destination of sticker i.
+export function compose(model, ids) {
+  const comp = Int32Array.from({ length: model.size }, (_, i) => i);
+  for (const id of ids) {
+    const p = model.perms[id];
+    for (let i = 0; i < comp.length; i++) comp[i] = p[comp[i]];
+  }
+  return comp;
+}
+
 export function applyMove(model, state, id) {
   const perm = model.perms[id];
   const out = new Uint8Array(state.length);
