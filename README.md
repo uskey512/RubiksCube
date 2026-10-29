@@ -175,3 +175,5 @@ blender -b --factory-startup -P scripts/build_cubes.py -- --sizes 3 4 5 6 10 15 
 ```bash
 blender -b --factory-startup -P scripts/render_previews.py -- --sizes 3 4 5 6
 ```
+
+リンクを共有したときに出る OGP 画像（`previews/og_20x20.jpg`、シャッフルした 20×20、1200×630）は `--og` で描き直す。
