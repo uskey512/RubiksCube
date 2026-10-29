@@ -89,7 +89,7 @@ const status = document.getElementById('status');
 const log = document.getElementById('log');
 let model = null, cube = null, cubies = [], size = 0, lastMove = null;
 let queue = Promise.resolve();
-let worker = null, solving = false;
+let worker = null, solving = false, playClock = 0;
 const solveButtons = [];
 
 const enqueue = (fn) => (queue = queue.then(fn).catch((e) => {
@@ -208,6 +208,13 @@ function addStep(name) {
 function setSolving(on) {
   solving = on;
   for (const b of solveButtons) b.disabled = on;
+  if (!on) clearInterval(playClock);
+}
+
+// Elapsed playback time as m:ss.s.
+function clock(ms) {
+  const tenths = Math.floor(ms / 100);
+  return `${Math.floor(tenths / 600)}:${((tenths % 600) / 10).toFixed(1).padStart(4, '0')}`;
 }
 
 function requestSolution(n, state, method) {
@@ -231,6 +238,15 @@ function solve(method) {
     const calc = `計算 ${Math.round(result.ms)} ms`;
     status.textContent = count ? `${label}: ${count} 手 · ${calc}` : 'もう揃っています';
     const ms = Math.max(30, Math.min(220, 30000 / count));
+    let played = 0;
+    let start = 0;
+    const showProgress = () => (status.textContent = `${label}: ${played} / ${count} 手 · ${calc} · 再生 ${clock(performance.now() - start)}`);
+    if (count) {
+      enqueue(() => {
+        start = performance.now();
+        playClock = setInterval(showProgress, 100);
+      });
+    }
     let done = 0;
     for (const stage of result.stages) {
       if (!stage.moves) continue;
@@ -243,7 +259,8 @@ function solve(method) {
         const at = done;
         enqueue(() => {
           row.lastChild.textContent = `${k} / ${stage.moves} 手`;
-          status.textContent = `${label}: ${at} / ${count} 手 · ${calc}`;
+          played = at;
+          showProgress();
         });
         turn('xyz'[m.axis], m.layer, m.q, ms);
       }
@@ -254,8 +271,9 @@ function solve(method) {
       });
     }
     enqueue(() => {
-      if (count) status.textContent = `${label}: 完成（${count} 手 · ${calc}）`;
+      const elapsed = performance.now() - start;
       setSolving(false);
+      if (count) status.textContent = `${label}: 完成（${count} 手 · ${calc} · 再生 ${clock(elapsed)}）`;
     });
   });
 }
