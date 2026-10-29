@@ -19,7 +19,7 @@
   canvas { display: block; touch-action: none; }
   #top { position: fixed; top: 12px; left: 12px; right: 12px; }
   #ui { display: flex; flex-wrap: wrap; gap: 6px; }
-  button { background: #2e3138; color: inherit; border: 1px solid #454a54; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  button { background: #2e3138; color: #e8e8ea; border: 1px solid #454a54; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
   button[aria-pressed="true"] { background: #3d5bd9; border-color: #3d5bd9; }
   #stats, #help { position: fixed; bottom: 12px; opacity: .65; font-size: 12px; }
   #stats { left: 12px; font-variant-numeric: tabular-nums; }
@@ -36,6 +36,9 @@
   @keyframes step-in { from { opacity: 0; transform: translateX(-6px); } }
   @media (prefers-reduced-motion: reduce) { .step { animation: none; } }
   button:disabled { opacity: .5; cursor: default; }
+  body.candy { background: #fbeef3; color: #4b3a45; }
+  body.candy #status, body.candy #log { text-shadow: none; }
+  body.candy .step.current { color: #c2185b; }
 </style>
 </head>
 <body>
@@ -59,6 +62,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { getModel, stickerIndex } from '../solver/cube.js';
 import { partsFrom, buildCube } from './build-cube.js';
+import { candyParts, CANDY_BACKGROUND } from './candy.js';
 
 const SIZES = [3, 4, 5, 6, 10, 15, 20];
 const COLOR_IDS = { white: 0, red: 1, green: 2, yellow: 3, orange: 4, blue: 5 };
@@ -102,6 +106,9 @@ const status = document.getElementById('status');
 const log = document.getElementById('log');
 let parts = null, cube = null, cubies = [], size = 0, lastMove = null;
 let instances = [], moved = true;
+// 'normal' or 'candy'. The candy parts are made the first time they are needed.
+let look = 'normal', candy = null;
+const normalLook = new WeakMap();
 let queue = Promise.resolve();
 let worker = null, solving = false, playClock = 0;
 const solveButtons = [];
@@ -131,7 +138,8 @@ async function load(n) {
   // A copy: turning a layer moves cubies in and out of cube.children.
   cubies = [...cube.children];
   scene.add(cube);
-  buildInstances();
+  cube.traverse((o) => o.isMesh && normalLook.set(o, { geometry: o.geometry, material: o.material }));
+  applyLook();
   size = n;
   lastMove = null;
   camera.position.set(1, 0.85, 1.3).normalize().multiplyScalar(n * 4.2);
@@ -168,6 +176,20 @@ function buildInstances() {
   });
   for (const c of cubies) c.visible = false;
   moved = true;
+}
+
+// Swaps every part's geometry and material, so the cube keeps its state, even mid-turn.
+function applyLook() {
+  if (look === 'candy') candy ??= candyParts();
+  scene.background.set(look === 'candy' ? CANDY_BACKGROUND : 0x1d1f23);
+  document.body.classList.toggle('candy', look === 'candy');
+  cube.traverse((o) => {
+    if (!o.isMesh) return;
+    const part = look === 'normal' ? normalLook.get(o) : o.userData.grid ? candy.body : candy.stickers[o.userData.color];
+    o.geometry = part.geometry;
+    o.material = part.material;
+  });
+  buildInstances();
 }
 
 function syncInstances() {
@@ -353,6 +375,20 @@ for (const [label, fn, isSolve] of buttons) {
   ui.append(b);
   if (isSolve) solveButtons.push(b);
 }
+// Shows the look it switches to.
+const lookButton = document.createElement('button');
+const showLookButton = () => {
+  lookButton.textContent = look === 'normal' ? '🍬' : '🟥';
+  lookButton.title = look === 'normal' ? 'キャンディの見た目にする' : '通常の見た目に戻す';
+  lookButton.setAttribute('aria-label', lookButton.title);
+};
+lookButton.onclick = () => {
+  look = look === 'normal' ? 'candy' : 'normal';
+  if (cube) applyLook();
+  showLookButton();
+};
+showLookButton();
+ui.append(lookButton);
 
 addEventListener('keydown', (e) => {
   const face = e.key.toUpperCase();
@@ -370,7 +406,8 @@ renderer.setAnimationLoop(() => {
   // fixed near plane, depth precision at a big cube's viewing distance gets coarser than the
   // sticker's thickness and the body shows through the stickers.
   const distance = camera.position.distanceTo(controls.target);
-  const radius = size * 0.87 + 0.1;
+  // The margin covers the candy look's pieces, which stand out past the body.
+  const radius = size * 0.87 + 0.4;
   camera.near = Math.max(0.02, distance - radius);
   camera.far = distance + radius;
   camera.updateProjectionMatrix();
