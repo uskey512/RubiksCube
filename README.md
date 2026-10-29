@@ -13,6 +13,7 @@ WebGL 表示用の、パーツ単位で回せるキューブモデル。
 | `textures/` | 生成済みテクスチャ（PNG） |
 | `previews/` | Cycles によるプレビュー画像 |
 | `viewer/index.html` | three.js の動作確認用ビューア |
+| `solver/` | 自動で解くソルバー（JavaScript、依存なし） |
 | `scripts/` | モデル生成・プレビュー描画スクリプト |
 
 ## モデル構造
@@ -61,7 +62,52 @@ function turnLayer(axis, layer, quarter) {      // axis: 'x'|'y'|'z', layer: 0..
 python3 -m http.server 8765
 ```
 
-起動後に `http://localhost:8765/viewer/` を開く。U D L R F B キーで外側の面、Shift で逆回転、ボタンでサイズ切替とシャッフル。
+起動後に `http://localhost:8765/viewer/` を開く。U D L R F B キーで外側の面、Shift で逆回転、ボタンでサイズ切替・シャッフル・自動で解く。
+
+## 自動で解く
+
+`solver/` は今の盤面から解法の手順を計算する。手で回した途中の状態など、どんな状態からでも解ける。
+
+| サイズ | 方式 | 手数（平均 / 最大） |
+|---|---|---|
+| 3×3 | Kociemba の二段階法 | 21 / 23 |
+| 4×4 | リダクション法 | 197 / 231 |
+| 5×5 | リダクション法 | 270 / 311 |
+| 6×6 | リダクション法 | 517 / 565 |
+
+手数は各 200 回のランダムな状態で計測した値。1 回の計算は数ミリ秒〜0.6 秒程度。
+
+リダクション法の手順:
+
+1. コーナー（奇数サイズは中央のエッジとセンターも）を 3×3 として Kociemba で揃える
+2. エッジを軌道（入れ替わりうる駒の組）ごとに揃える。3 つの駒だけを入れ替える手順（3-cycle）を使い、偶数サイズ特有のパリティはスライスの 1/4 回転で直す
+3. センターを軌道ごとに 3-cycle で揃える
+
+3-cycle は交換子を探索して自動生成し、本当に 3 駒しか動かないことをシミュレーションで確認してから使う。手順を書き写していないので、サイズが増えても同じコードで動く。
+
+| ファイル | 内容 |
+|---|---|
+| `solver/cube.js` | NxN の盤面モデル（座標系と回転の向きはビューアの `turn()` と同じ） |
+| `solver/kociemba.js` | 3×3 の二段階法 |
+| `solver/solve.js` | リダクション法の本体 `solveCube(n, state)` |
+| `solver/worker.js` | 画面を止めないための Web Worker |
+| `solver/test.mjs` | ランダムな状態を解いて検証するテスト |
+
+使い方（盤面の読み取りは `viewer/index.html` の `readState()` を参照）:
+
+```js
+const worker = new Worker('solver/worker.js', { type: 'module' });
+worker.onmessage = ({ data }) => {
+  for (const { axis, layer, q } of data.moves) turnLayer('xyz'[axis], layer, q);  // q: 1, -1, 2（90° 単位）
+};
+worker.postMessage({ n: 4, state });  // state: 6n² 個の色 ID（U R F D L B 順の面ごと）
+```
+
+テスト:
+
+```bash
+node solver/test.mjs 200
+```
 
 ## 質感
 

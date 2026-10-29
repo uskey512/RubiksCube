@@ -13,10 +13,13 @@
   #stats, #help { position: fixed; bottom: 12px; opacity: .65; font-size: 12px; }
   #stats { left: 12px; font-variant-numeric: tabular-nums; }
   #help { right: 12px; text-align: right; }
+  #status { position: fixed; top: 52px; left: 12px; right: 12px; font-size: 13px; opacity: .85; }
+  button:disabled { opacity: .5; cursor: default; }
 </style>
 </head>
 <body>
 <div id="ui"></div>
+<div id="status"></div>
 <div id="stats"></div>
 <div id="help">ドラッグ: 視点回転 / ホイール・ピンチ: ズーム<br>U D L R F B キー: 外側の面を回す（Shift で逆回転）</div>
 <script type="importmap">
@@ -30,8 +33,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { getModel, stickerIndex } from '../solver/cube.js';
 
 const SIZES = [3, 4, 5, 6];
+const COLOR_IDS = { white: 0, red: 1, green: 2, yellow: 3, orange: 4, blue: 5 };
+const STAGE_NAMES = { '3x3': '3x3部分', corners: 'コーナー', edges: 'エッジ', centers: 'センター' };
 const AXES = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
 // Clockwise as seen from outside the face: axis, outer layer (0 or n-1), quarter-turn sign.
 const FACE_MOVES = { U: ['y', 1, -1], D: ['y', 0, 1], R: ['x', 1, -1], L: ['x', 0, 1], F: ['z', 1, -1], B: ['z', 0, 1] };
@@ -56,10 +62,15 @@ controls.enableDamping = true;
 const loader = new GLTFLoader();
 const maxAniso = renderer.capabilities.getMaxAnisotropy();
 const stats = document.getElementById('stats');
+const status = document.getElementById('status');
 let model = null, cube = null, cubies = [], size = 0, lastMove = null;
 let queue = Promise.resolve();
+let worker = null, solving = false, solveButton = null;
 
-const enqueue = (fn) => (queue = queue.then(fn).catch((e) => { stats.textContent = String(e); }));
+const enqueue = (fn) => (queue = queue.then(fn).catch((e) => {
+  status.textContent = `エラー: ${e.message}`;
+  setSolving(false);
+}));
 
 async function load(n) {
   stats.textContent = '読み込み中…';
@@ -130,6 +141,57 @@ function shuffle() {
   }
 }
 
+// Sticker colors in the solver's facelet order, read from where each sticker currently is.
+function readState() {
+  const facelets = getModel(size);
+  const state = new Uint8Array(facelets.size).fill(255);
+  const at = new THREE.Vector3();
+  cube.updateMatrixWorld(true);
+  for (const cubie of cubies) {
+    const p = cubie.position.toArray().map((v) => Math.round(v * 2));
+    for (const sticker of cubie.children) {
+      if (!sticker.userData.color) continue;
+      cube.worldToLocal(sticker.getWorldPosition(at));
+      const normal = at.sub(cubie.position).toArray().map((v) => Math.round(v * 2));
+      state[stickerIndex(facelets, p, normal)] = COLOR_IDS[sticker.userData.color];
+    }
+  }
+  if (state.includes(255)) throw new Error('盤面を読み取れませんでした');
+  return state;
+}
+
+function setSolving(on) {
+  solving = on;
+  if (solveButton) solveButton.disabled = on;
+}
+
+function requestSolution(n, state) {
+  worker ??= new Worker(new URL('../solver/worker.js', import.meta.url), { type: 'module' });
+  return new Promise((resolve, reject) => {
+    worker.onmessage = ({ data }) => (data.error ? reject(new Error(data.error)) : resolve(data));
+    worker.onerror = (e) => reject(new Error(e.message));
+    worker.postMessage({ n, state });
+  });
+}
+
+function solve() {
+  if (solving) return;
+  setSolving(true);
+  status.textContent = '解法を計算中…';
+  return enqueue(async () => {
+    const result = await requestSolution(size, readState());
+    const count = result.moves.length;
+    const detail = result.stages.filter((s) => s.moves).map((s) => `${STAGE_NAMES[s.name]} ${s.moves}`).join(' / ');
+    status.textContent = count ? `${count} 手で解きます（${detail}）· 計算 ${Math.round(result.ms)} ms` : 'もう揃っています';
+    const ms = Math.max(40, Math.min(250, 20000 / count));
+    for (const m of result.moves) turn('xyz'[m.axis], m.layer, m.q, ms);
+    enqueue(() => {
+      if (count) status.textContent = `完成（${count} 手）`;
+      setSolving(false);
+    });
+  });
+}
+
 const ui = document.getElementById('ui');
 for (const n of SIZES) {
   const b = document.createElement('button');
@@ -138,11 +200,12 @@ for (const n of SIZES) {
   b.onclick = () => enqueue(() => load(n));
   ui.append(b);
 }
-for (const [label, fn] of [['シャッフル', shuffle], ['リセット', () => enqueue(() => load(size))]]) {
+for (const [label, fn] of [['シャッフル', shuffle], ['解く', solve], ['リセット', () => enqueue(() => load(size))]]) {
   const b = document.createElement('button');
   b.textContent = label;
   b.onclick = fn;
   ui.append(b);
+  if (fn === solve) solveButton = b;
 }
 
 addEventListener('keydown', (e) => {
@@ -161,7 +224,7 @@ renderer.setAnimationLoop(() => {
   if (cube) stats.textContent = `${size}×${size} · ${cubies.length} パーツ · ${renderer.info.render.calls} draw calls · ${renderer.info.render.triangles.toLocaleString()} 三角形`;
 });
 
-window.viewer = { turn, faceTurn, shuffle, load: (n) => enqueue(() => load(n)), get cubies() { return cubies; }, camera, controls };
+window.viewer = { turn, faceTurn, shuffle, solve, readState, load: (n) => enqueue(() => load(n)), get cubies() { return cubies; }, camera, controls };
 enqueue(() => load(3));
 </script>
 </body>
