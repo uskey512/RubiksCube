@@ -31,6 +31,9 @@ def setup_render(scene, samples):
     scene.cycles.use_denoising = True
     scene.render.resolution_x = 1280
     scene.render.resolution_y = 960
+    scene.render.image_settings.file_format = "WEBP"
+    scene.render.image_settings.color_mode = "RGB"
+    scene.render.image_settings.quality = 90
     # Same curve as three.js NeutralToneMapping, so colors match the WebGL viewer.
     scene.view_settings.view_transform = "Khronos PBR Neutral"
 
@@ -77,7 +80,7 @@ def turn_layer(root, gl_axis, index, degrees):
 
 
 def render(scene, name):
-    scene.render.filepath = os.path.join(PREVIEW_DIR, name + ".png")
+    scene.render.filepath = os.path.join(PREVIEW_DIR, name + ".webp")
     bpy.ops.render.render(write_still=True)
 
 

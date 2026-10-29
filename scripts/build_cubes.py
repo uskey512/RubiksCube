@@ -1,14 +1,18 @@
-"""Build NxN puzzle cubes as glTF binaries with one node per cubie.
+"""Build NxN puzzle cubes as glTF files with one node per cubie.
 
-blender -b --factory-startup -P scripts/build_cubes.py -- --sizes 3 4 5 6
+blender -b --factory-startup -P scripts/build_cubes.py -- --sizes 3 4 5 6 10 15 20
+
+Every size uses the same part meshes and textures, so they are written once (dist/cube_parts.bin,
+textures/*.webp) and each dist/cube_NxN.gltf only says which part goes where.
 """
 import argparse
 import itertools
+import json
 import math
 import os
-import struct
+import shutil
 import sys
-import zlib
+import tempfile
 
 import bmesh
 import bpy
@@ -36,6 +40,7 @@ STICKER_EDGE_SEGMENTS = 3
 STICKER_VARIANTS = 8
 STICKER_TEX = 2048
 STICKER_UV_SPAN = 0.5
+PARTS_SEED = 7
 
 # Face letters and normals are in glTF space: +Y up, +Z toward the viewer.
 FACES = {
@@ -114,38 +119,22 @@ def orm(roughness):
     return np.stack([np.ones_like(r), r, np.zeros_like(r)], -1)
 
 
-def save_png(name, pixels):
-    """Write an 8-bit gray or RGB PNG (row 0 = bottom, as in Blender) with per-row adaptive filtering.
+def save_webp(name, pixels):
+    """Write a texture as lossless WebP. Row 0 is the bottom, as in Blender.
 
-    The glTF exporter embeds PNG sources byte-for-byte, so this encoder decides the .glb size.
+    Lossy WebP is far smaller, but its error is as large as the normal maps' fine relief.
     """
-    a = np.round(np.clip(pixels, 0, 1) * 255).astype(np.int16)[::-1]
+    # Round to 8-bit steps here so Blender stores exactly these values.
+    a = (np.round(np.clip(pixels, 0, 1) * 255) / 255).astype(np.float32)
     if a.ndim == 2:
-        a = a[..., None]
-    h, w, c = a.shape
-    x = a.reshape(h, w * c)
-    left = np.zeros_like(x)
-    left[:, c:] = x[:, :-c]
-    up = np.zeros_like(x)
-    up[1:] = x[:-1]
-    up_left = np.zeros_like(x)
-    up_left[1:, c:] = x[:-1, :-c]
-    p = left + up - up_left
-    pa, pb, pc = np.abs(p - left), np.abs(p - up), np.abs(p - up_left)
-    paeth = np.where((pa <= pb) & (pa <= pc), left, np.where(pb <= pc, up, up_left))
-    filtered = np.stack([x, x - left, x - up, x - (left + up) // 2, x - paeth]) % 256
-    cost = np.abs(filtered.astype(np.uint8).view(np.int8).astype(np.int32)).sum(2)
-    best = cost.argmin(0)
-    rows = filtered[best, np.arange(h)].astype(np.uint8)
-    raw = np.concatenate([best[:, None].astype(np.uint8), rows], 1).tobytes()
-
-    def chunk(tag, data):
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
-
-    header = struct.pack(">IIBBBBB", w, h, 8, {1: 0, 3: 2}[c], 0, 0, 0)
-    with open(os.path.join(TEX_DIR, name + ".png"), "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw, 9))
-                + chunk(b"IEND", b""))
+        a = np.repeat(a[..., None], 3, -1)
+    h, w, _ = a.shape
+    img = bpy.data.images.new(name, w, h, alpha=False)
+    img.colorspace_settings.name = "Non-Color"
+    img.pixels.foreach_set(np.concatenate([a, np.ones((h, w, 1), np.float32)], -1).ravel())
+    img.file_format = "WEBP"
+    img.save(filepath=os.path.join(TEX_DIR, name + ".webp"), quality=100)
+    bpy.data.images.remove(img)
 
 
 def generate_textures():
@@ -155,23 +144,23 @@ def generate_textures():
     n = STICKER_TEX
     scr = scratches(rng, n, 50, (20, 450), 0.7)
     height = slope_scaled(noise(rng, n, 40), 0.006) + slope_scaled(noise(rng, n, 1.6), 0.007) - scr * 0.25
-    save_png("sticker_normal", height_to_normal(height))
-    save_png("sticker_orm", orm(0.17 + 0.07 * smoothstep(0.2, 1.6, noise(rng, n, 45)) + 0.3 * scr))
-    save_png("sticker_albedo", 1 - 0.035 * smoothstep(-1.5, 1.5, noise(rng, n, 90))
+    save_webp("sticker_normal", height_to_normal(height))
+    save_webp("sticker_orm", orm(0.17 + 0.07 * smoothstep(0.2, 1.6, noise(rng, n, 45)) + 0.3 * scr))
+    save_webp("sticker_albedo", 1 - 0.035 * smoothstep(-1.5, 1.5, noise(rng, n, 90))
              - 0.01 * smoothstep(-2, 2, noise(rng, n, 10)))
 
     n = BODY_TEX
     scr = scratches(rng, n, 25, (15, 300), 0.7)
     height = slope_scaled(noise(rng, n, 2.0), 0.018) + slope_scaled(noise(rng, n, 60), 0.004) - scr * 0.15
-    save_png("plastic_normal", height_to_normal(height))
-    save_png("plastic_orm", orm(0.42 + 0.05 * noise(rng, n, 70) + 0.18 * scr))
+    save_webp("plastic_normal", height_to_normal(height))
+    save_webp("plastic_orm", orm(0.42 + 0.05 * noise(rng, n, 70) + 0.18 * scr))
 
 
 # --- materials ----------------------------------------------------------------
 
 def image_node(nodes, name, colorspace):
     node = nodes.new("ShaderNodeTexImage")
-    node.image = bpy.data.images.load(os.path.join(TEX_DIR, name + ".png"), check_existing=True)
+    node.image = bpy.data.images.load(os.path.join(TEX_DIR, name + ".webp"), check_existing=True)
     node.image.colorspace_settings.name = colorspace
     return node
 
@@ -284,11 +273,9 @@ def build_sticker_mesh(name, rng, material):
 
 # --- assembly -----------------------------------------------------------------
 
-def build_cube(n):
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    scene = bpy.context.scene
-    rng = np.random.default_rng(n)
-
+def build_parts():
+    """The materials and every mesh variant. They are the same for every size."""
+    rng = np.random.default_rng(PARTS_SEED)
     plastic = make_material("Plastic_Black", "plastic", PLASTIC_COLOR, albedo_texture=False)
     bodies = [build_body_mesh(f"CubieBody_{i}", rng, plastic) for i in range(BODY_VARIANTS)]
     stickers = {}
@@ -297,29 +284,110 @@ def build_cube(n):
                             srgb_hex_to_linear(hex_color), albedo_texture=True)
         stickers[face] = [build_sticker_mesh(f"Sticker_{color_name.capitalize()}_{i}", rng, mat)
                           for i in range(STICKER_VARIANTS)]
+    return bodies, stickers
 
+
+def layout(n):
+    """The outer cubies of an NxN cube as (grid, body variant, [(face, sticker variant), ...])."""
+    rng = np.random.default_rng(n)
+    for grid in itertools.product(range(n), repeat=3):
+        faces = [f for f, (normal, _, _) in FACES.items()
+                 if any(c and g == (n - 1 if c > 0 else 0) for c, g in zip(normal, grid))]
+        if faces:
+            body = int(rng.integers(BODY_VARIANTS))
+            yield grid, body, [(face, int(rng.integers(STICKER_VARIANTS))) for face in faces]
+
+
+def export_parts(bodies, stickers):
+    """Export every mesh once and return the glTF document minus its nodes, for the sizes to share."""
+    scene = bpy.context.scene
+    for me in [*bodies, *(m for variants in stickers.values() for m in variants)]:
+        scene.collection.objects.link(bpy.data.objects.new(me.name, me))
+    with tempfile.TemporaryDirectory() as tmp:
+        bpy.ops.export_scene.gltf(
+            filepath=os.path.join(tmp, "cube_parts.gltf"),
+            export_format="GLTF_SEPARATE",
+            export_yup=True,
+            export_tangents=False,
+            export_cameras=False,
+            export_lights=False,
+            export_image_format="AUTO",
+        )
+        with open(os.path.join(tmp, "cube_parts.gltf")) as f:
+            doc = json.load(f)
+        (buffer,) = doc["buffers"]
+        shutil.copyfile(os.path.join(tmp, buffer["uri"]), os.path.join(DIST_DIR, "cube_parts.bin"))
+    for obj in list(scene.collection.objects):
+        bpy.data.objects.remove(obj)
+
+    buffer["uri"] = "cube_parts.bin"
+    # Point at the shared lossless textures instead of the exporter's re-encoded copies.
+    for image in doc["images"]:
+        image["uri"] = "../textures/" + os.path.splitext(os.path.basename(image["uri"]))[0] + ".webp"
+    for texture in doc["textures"]:
+        source = texture.pop("source", None)
+        webp = texture.setdefault("extensions", {}).setdefault("EXT_texture_webp", {})
+        webp.setdefault("source", source)
+    for key in ("extensionsUsed", "extensionsRequired"):
+        doc[key] = sorted(set(doc.get(key, [])) | {"EXT_texture_webp"})
+    for key in ("scene", "scenes", "nodes"):
+        doc.pop(key, None)
+    return doc
+
+
+def number(v):
+    return int(v) if float(v).is_integer() else round(float(v), 7)
+
+
+def write_gltf(n, parts):
+    """An NxN cube as nodes over the shared parts."""
+    mesh_index = {m["name"]: i for i, m in enumerate(parts["meshes"])}
+    s = round(math.sqrt(0.5), 7)
+    # Turns the sticker meshes, which face +Y, toward each face.
+    rotations = {"R": [0, 0, -s, s], "L": [0, 0, s, s], "U": None, "D": [1, 0, 0, 0], "F": [s, 0, 0, s], "B": [-s, 0, 0, s]}
+    offset = (n - 1) / 2
+    root = {"name": f"Cube{n}x{n}", "extras": {"size": n, "pitch": PITCH}, "children": []}
+    nodes = [root]
+    for grid, body, faces in layout(n):
+        name = "Cubie_{}_{}_{}".format(*grid)
+        cubie = {"name": name, "mesh": mesh_index[f"CubieBody_{body}"],
+                 "translation": [number((g - offset) * PITCH) for g in grid],
+                 "extras": {"grid": list(grid), "stickers": "".join(f for f, _ in faces)}, "children": []}
+        root["children"].append(len(nodes))
+        nodes.append(cubie)
+        for face, variant in faces:
+            normal, color_name, _ = FACES[face]
+            sticker = {"name": f"{name}_{face}", "mesh": mesh_index[f"Sticker_{color_name.capitalize()}_{variant}"],
+                       "translation": [number(c * BODY_HALF) for c in normal], "extras": {"face": face, "color": color_name}}
+            if rotations[face]:
+                sticker["rotation"] = rotations[face]
+            cubie["children"].append(len(nodes))
+            nodes.append(sticker)
+    doc = {"asset": parts["asset"], **{k: v for k, v in parts.items() if k != "asset"},
+           "scene": 0, "scenes": [{"name": "Scene", "nodes": [0]}], "nodes": nodes}
+    with open(os.path.join(DIST_DIR, f"cube_{n}x{n}.gltf"), "w") as f:
+        json.dump(doc, f, separators=(",", ":"))
+
+
+def build_blend(n, bodies, stickers):
+    """The same cube as a Blender scene for editing; textures stay in textures/."""
+    scene = bpy.context.scene
     root = bpy.data.objects.new(f"Cube{n}x{n}", None)
     root["size"] = n
     root["pitch"] = PITCH
     scene.collection.objects.link(root)
-
     offset = (n - 1) / 2
-    for grid in itertools.product(range(n), repeat=3):
-        faces = [f for f, (normal, _, _) in FACES.items()
-                 if any(c and g == (n - 1 if c > 0 else 0) for c, g in zip(normal, grid))]
-        if not faces:
-            continue
+    for grid, body, faces in layout(n):
         name = "Cubie_{}_{}_{}".format(*grid)
-        cubie = bpy.data.objects.new(name, bodies[rng.integers(BODY_VARIANTS)])
+        cubie = bpy.data.objects.new(name, bodies[body])
         cubie.parent = root
         cubie.location = gl_to_bl([(g - offset) * PITCH for g in grid])
         cubie["grid"] = list(grid)
-        cubie["stickers"] = "".join(faces)
+        cubie["stickers"] = "".join(f for f, _ in faces)
         scene.collection.objects.link(cubie)
-
-        for face in faces:
+        for face, variant in faces:
             normal, color_name, _ = FACES[face]
-            sticker = bpy.data.objects.new(f"{name}_{face}", stickers[face][rng.integers(STICKER_VARIANTS)])
+            sticker = bpy.data.objects.new(f"{name}_{face}", stickers[face][variant])
             sticker.parent = cubie
             sticker.location = gl_to_bl(normal) * BODY_HALF
             sticker.rotation_mode = "QUATERNION"
@@ -327,36 +395,32 @@ def build_cube(n):
             sticker["face"] = face
             sticker["color"] = color_name
             scene.collection.objects.link(sticker)
-
-    os.makedirs(DIST_DIR, exist_ok=True)
-    os.makedirs(BLEND_DIR, exist_ok=True)
-    bpy.ops.export_scene.gltf(
-        filepath=os.path.join(DIST_DIR, f"cube_{n}x{n}.glb"),
-        export_format="GLB",
-        export_extras=True,
-        export_yup=True,
-        export_tangents=False,
-        export_cameras=False,
-        export_lights=False,
-        export_image_format="AUTO",
-    )
-    for img in bpy.data.images:
-        img.pack()
     bpy.context.preferences.filepaths.save_version = 0
     bpy.ops.wm.save_as_mainfile(filepath=os.path.join(BLEND_DIR, f"cube_{n}x{n}.blend"), compress=True)
+    # Texture paths only become relative once the file has a location.
+    bpy.ops.file.make_paths_relative()
+    bpy.ops.wm.save_mainfile(compress=True)
+    for obj in [root, *root.children_recursive]:
+        bpy.data.objects.remove(obj)
 
 
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sizes", type=int, nargs="+", default=[3, 4, 5, 6])
+    parser.add_argument("--sizes", type=int, nargs="+", default=[3, 4, 5, 6, 10, 15, 20])
     parser.add_argument("--regen-textures", action="store_true")
     args = parser.parse_args(argv)
 
-    if args.regen_textures or not os.path.exists(os.path.join(TEX_DIR, "plastic_orm.png")):
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    if args.regen_textures or not os.path.exists(os.path.join(TEX_DIR, "plastic_orm.webp")):
         generate_textures()
+    os.makedirs(DIST_DIR, exist_ok=True)
+    os.makedirs(BLEND_DIR, exist_ok=True)
+    bodies, stickers = build_parts()
+    parts = export_parts(bodies, stickers)
     for n in args.sizes:
-        build_cube(n)
+        write_gltf(n, parts)
+        build_blend(n, bodies, stickers)
 
 
 main()

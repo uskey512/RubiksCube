@@ -102,7 +102,7 @@ const enqueue = (fn) => (queue = queue.then(fn).catch((e) => {
 
 async function load(n) {
   stats.textContent = '読み込み中…';
-  const gltf = await loader.loadAsync(`../dist/cube_${n}x${n}.glb`);
+  const gltf = await loader.loadAsync(`../dist/cube_${n}x${n}.gltf`);
   if (model) scene.remove(model);
   model = gltf.scene;
   cube = model.getObjectByName(`Cube${n}x${n}`);
