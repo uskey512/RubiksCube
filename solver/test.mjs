@@ -20,7 +20,7 @@ function check(solve, n, state, label) {
   }
 }
 
-const METHODS = [['computer', solveCube, [2, 3, 4, 5, 6, 10, 15]], ['human', solveHuman, [3, 4, 5, 6, 10, 15]]];
+const METHODS = [['computer', solveCube, [2, 3, 4, 5, 6, 10, 15, 20]], ['human', solveHuman, [3, 4, 5, 6, 10, 15, 20]]];
 // Big cubes take far longer per solve, so they get a twentieth of the random trials.
 const trialsFor = (n) => (n > 7 ? Math.max(1, Math.round(trials / 20)) : trials);
 

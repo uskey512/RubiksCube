@@ -49,7 +49,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { getModel, stickerIndex } from '../solver/cube.js';
 
-const SIZES = [3, 4, 5, 6, 10, 15];
+const SIZES = [3, 4, 5, 6, 10, 15, 20];
 const COLOR_IDS = { white: 0, red: 1, green: 2, yellow: 3, orange: 4, blue: 5 };
 const METHOD_NAMES = { computer: 'コンピューター式', human: '人の手順' };
 const STAGE_NAMES = {
@@ -72,6 +72,8 @@ renderer.toneMapping = THREE.NeutralToneMapping;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
+// World matrices are only recomputed when a layer moves; see syncInstances().
+scene.matrixWorldAutoUpdate = false;
 scene.background = new THREE.Color(0x1d1f23);
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
 const key = new THREE.DirectionalLight(0xffffff, 1.0);
@@ -88,6 +90,7 @@ const stats = document.getElementById('stats');
 const status = document.getElementById('status');
 const log = document.getElementById('log');
 let model = null, cube = null, cubies = [], size = 0, lastMove = null;
+let instances = [], moved = true;
 let queue = Promise.resolve();
 let worker = null, solving = false, playClock = 0;
 const solveButtons = [];
@@ -111,6 +114,7 @@ async function load(n) {
     }
   });
   scene.add(model);
+  buildInstances();
   size = n;
   lastMove = null;
   camera.position.set(1, 0.85, 1.3).normalize().multiplyScalar(n * 4.2);
@@ -120,6 +124,41 @@ async function load(n) {
   for (const b of document.querySelectorAll('[data-size]')) b.setAttribute('aria-pressed', String(+b.dataset.size === n));
   status.textContent = '';
   log.textContent = '';
+}
+
+// Meshes that share a geometry and a material are drawn as one InstancedMesh, which keeps even
+// the biggest cube to a few dozen draw calls. The glTF meshes stay in the scene graph, hidden, so
+// turning layers and reading the state still work on them; their world matrices are copied into
+// the instances whenever something moved.
+function buildInstances() {
+  for (const { mesh } of instances) {
+    scene.remove(mesh);
+    mesh.dispose();
+  }
+  const groups = new Map();
+  cube.traverse((o) => {
+    if (!o.isMesh) return;
+    const key = `${o.geometry.uuid}/${o.material.uuid}`;
+    if (!groups.has(key)) groups.set(key, { geometry: o.geometry, material: o.material, sources: [] });
+    groups.get(key).sources.push(o);
+  });
+  instances = [...groups.values()].map(({ geometry, material, sources }) => {
+    const mesh = new THREE.InstancedMesh(geometry, material, sources.length);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    return { mesh, sources };
+  });
+  for (const c of cubies) c.visible = false;
+  moved = true;
+}
+
+function syncInstances() {
+  scene.updateMatrixWorld();
+  for (const { mesh, sources } of instances) {
+    for (let i = 0; i < sources.length; i++) mesh.setMatrixAt(i, sources[i].matrixWorld);
+    mesh.instanceMatrix.needsUpdate = true;
+  }
 }
 
 function snap(o) {
@@ -139,6 +178,7 @@ function turn(axis, layer, quarter, ms = 220) {
     for (const c of members) pivot.attach(c);
     const start = performance.now();
     const step = (now) => {
+      moved = true;
       const t = ms > 0 ? Math.min(1, (now - start) / ms) : 1;
       const e = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
       pivot.setRotationFromAxisAngle(AXES[axis], quarter * e * Math.PI / 2);
@@ -211,7 +251,8 @@ function setSolving(on) {
   if (!on) clearInterval(playClock);
 }
 
-const msText = (ms) => `${Math.round(ms).toLocaleString('ja-JP')} ms`;
+const num = (v) => Math.round(v).toLocaleString('ja-JP');
+const msText = (ms) => `${num(ms)} ms`;
 
 function requestSolution(n, state, method) {
   worker ??= new Worker(new URL('../solver/worker.js', import.meta.url), { type: 'module' });
@@ -232,11 +273,11 @@ function solve(method) {
     const result = await requestSolution(size, readState(), method);
     const count = result.moves.length;
     const calc = `計算 ${msText(result.ms)}`;
-    status.textContent = count ? `${label}: ${count} 手 · ${calc}` : 'もう揃っています';
+    status.textContent = count ? `${label}: ${num(count)} 手 · ${calc}` : 'もう揃っています';
     const ms = Math.max(30, Math.min(220, 30000 / count));
     let played = 0;
     let start = 0;
-    const showProgress = () => (status.textContent = `${label}: ${played} / ${count} 手 · ${calc} · 再生 ${msText(performance.now() - start)}`);
+    const showProgress = () => (status.textContent = `${label}: ${num(played)} / ${num(count)} 手 · ${calc} · 再生 ${msText(performance.now() - start)}`);
     if (count) {
       enqueue(() => {
         start = performance.now();
@@ -254,7 +295,7 @@ function solve(method) {
         const m = result.moves[done++];
         const at = done;
         enqueue(() => {
-          row.lastChild.textContent = `${k} / ${stage.moves} 手`;
+          row.lastChild.textContent = `${num(k)} / ${num(stage.moves)} 手`;
           played = at;
           showProgress();
         });
@@ -263,13 +304,13 @@ function solve(method) {
       enqueue(() => {
         row.className = 'step done';
         row.firstChild.textContent = '✓';
-        row.lastChild.textContent = `${stage.moves} 手`;
+        row.lastChild.textContent = `${num(stage.moves)} 手`;
       });
     }
     enqueue(() => {
       const elapsed = performance.now() - start;
       setSolving(false);
-      if (count) status.textContent = `${label}: 完成（${count} 手 · ${calc} · 再生 ${msText(elapsed)}）`;
+      if (count) status.textContent = `${label}: 完成（${num(count)} 手 · ${calc} · 再生 ${msText(elapsed)}）`;
     });
   });
 }
@@ -316,6 +357,10 @@ renderer.setAnimationLoop(() => {
   camera.near = Math.max(0.02, distance - radius);
   camera.far = distance + radius;
   camera.updateProjectionMatrix();
+  if (moved) {
+    syncInstances();
+    moved = false;
+  }
   renderer.render(scene, camera);
   if (cube) stats.textContent = `${size}×${size} · ${cubies.length} パーツ · ${renderer.info.render.calls} draw calls · ${renderer.info.render.triangles.toLocaleString()} 三角形`;
 });
