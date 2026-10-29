@@ -211,11 +211,7 @@ function setSolving(on) {
   if (!on) clearInterval(playClock);
 }
 
-// Elapsed playback time as m:ss.s.
-function clock(ms) {
-  const tenths = Math.floor(ms / 100);
-  return `${Math.floor(tenths / 600)}:${((tenths % 600) / 10).toFixed(1).padStart(4, '0')}`;
-}
+const msText = (ms) => `${Math.round(ms).toLocaleString('ja-JP')} ms`;
 
 function requestSolution(n, state, method) {
   worker ??= new Worker(new URL('../solver/worker.js', import.meta.url), { type: 'module' });
@@ -235,12 +231,12 @@ function solve(method) {
   return enqueue(async () => {
     const result = await requestSolution(size, readState(), method);
     const count = result.moves.length;
-    const calc = `計算 ${Math.round(result.ms)} ms`;
+    const calc = `計算 ${msText(result.ms)}`;
     status.textContent = count ? `${label}: ${count} 手 · ${calc}` : 'もう揃っています';
     const ms = Math.max(30, Math.min(220, 30000 / count));
     let played = 0;
     let start = 0;
-    const showProgress = () => (status.textContent = `${label}: ${played} / ${count} 手 · ${calc} · 再生 ${clock(performance.now() - start)}`);
+    const showProgress = () => (status.textContent = `${label}: ${played} / ${count} 手 · ${calc} · 再生 ${msText(performance.now() - start)}`);
     if (count) {
       enqueue(() => {
         start = performance.now();
@@ -273,7 +269,7 @@ function solve(method) {
     enqueue(() => {
       const elapsed = performance.now() - start;
       setSolving(false);
-      if (count) status.textContent = `${label}: 完成（${count} 手 · ${calc} · 再生 ${clock(elapsed)}）`;
+      if (count) status.textContent = `${label}: 完成（${count} 手 · ${calc} · 再生 ${msText(elapsed)}）`;
     });
   });
 }
