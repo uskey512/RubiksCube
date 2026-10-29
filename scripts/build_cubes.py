@@ -1,9 +1,10 @@
-"""Build NxN puzzle cubes as glTF files with one node per cubie.
+"""Build the part library that every cube size is assembled from, plus Blender scenes per size.
 
 blender -b --factory-startup -P scripts/build_cubes.py -- --sizes 3 4 5 6 10 15 20
 
-Every size uses the same part meshes and textures, so they are written once (dist/cube_parts.bin,
-textures/*.webp) and each dist/cube_NxN.gltf only says which part goes where.
+dist/cube_parts.gltf holds each body and sticker mesh variant once (geometry in cube_parts.bin,
+textures in textures/*.webp); viewer/build-cube.js assembles any NxN cube from it at runtime.
+--sizes only chooses which blend/cube_NxN.blend files to write.
 """
 import argparse
 import itertools
@@ -299,7 +300,7 @@ def layout(n):
 
 
 def export_parts(bodies, stickers):
-    """Export every mesh once and return the glTF document minus its nodes, for the sizes to share."""
+    """Write dist/cube_parts.gltf: one node per mesh variant, named after the mesh."""
     scene = bpy.context.scene
     for me in [*bodies, *(m for variants in stickers.values() for m in variants)]:
         scene.collection.objects.link(bpy.data.objects.new(me.name, me))
@@ -330,42 +331,7 @@ def export_parts(bodies, stickers):
         webp.setdefault("source", source)
     for key in ("extensionsUsed", "extensionsRequired"):
         doc[key] = sorted(set(doc.get(key, [])) | {"EXT_texture_webp"})
-    for key in ("scene", "scenes", "nodes"):
-        doc.pop(key, None)
-    return doc
-
-
-def number(v):
-    return int(v) if float(v).is_integer() else round(float(v), 7)
-
-
-def write_gltf(n, parts):
-    """An NxN cube as nodes over the shared parts."""
-    mesh_index = {m["name"]: i for i, m in enumerate(parts["meshes"])}
-    s = round(math.sqrt(0.5), 7)
-    # Turns the sticker meshes, which face +Y, toward each face.
-    rotations = {"R": [0, 0, -s, s], "L": [0, 0, s, s], "U": None, "D": [1, 0, 0, 0], "F": [s, 0, 0, s], "B": [-s, 0, 0, s]}
-    offset = (n - 1) / 2
-    root = {"name": f"Cube{n}x{n}", "extras": {"size": n, "pitch": PITCH}, "children": []}
-    nodes = [root]
-    for grid, body, faces in layout(n):
-        name = "Cubie_{}_{}_{}".format(*grid)
-        cubie = {"name": name, "mesh": mesh_index[f"CubieBody_{body}"],
-                 "translation": [number((g - offset) * PITCH) for g in grid],
-                 "extras": {"grid": list(grid), "stickers": "".join(f for f, _ in faces)}, "children": []}
-        root["children"].append(len(nodes))
-        nodes.append(cubie)
-        for face, variant in faces:
-            normal, color_name, _ = FACES[face]
-            sticker = {"name": f"{name}_{face}", "mesh": mesh_index[f"Sticker_{color_name.capitalize()}_{variant}"],
-                       "translation": [number(c * BODY_HALF) for c in normal], "extras": {"face": face, "color": color_name}}
-            if rotations[face]:
-                sticker["rotation"] = rotations[face]
-            cubie["children"].append(len(nodes))
-            nodes.append(sticker)
-    doc = {"asset": parts["asset"], **{k: v for k, v in parts.items() if k != "asset"},
-           "scene": 0, "scenes": [{"name": "Scene", "nodes": [0]}], "nodes": nodes}
-    with open(os.path.join(DIST_DIR, f"cube_{n}x{n}.gltf"), "w") as f:
+    with open(os.path.join(DIST_DIR, "cube_parts.gltf"), "w") as f:
         json.dump(doc, f, separators=(",", ":"))
 
 
@@ -417,9 +383,8 @@ def main():
     os.makedirs(DIST_DIR, exist_ok=True)
     os.makedirs(BLEND_DIR, exist_ok=True)
     bodies, stickers = build_parts()
-    parts = export_parts(bodies, stickers)
+    export_parts(bodies, stickers)
     for n in args.sizes:
-        write_gltf(n, parts)
         build_blend(n, bodies, stickers)
 
 

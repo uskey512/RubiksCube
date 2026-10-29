@@ -1,6 +1,6 @@
 # パズルキューブ モデル（3×3 〜 6×6・10×10・15×15・20×20）
 
-WebGL 表示用の、パーツ単位で回せるキューブモデル。
+WebGL 表示用の、パーツ単位で回せるキューブモデル。部品（本体とステッカー）だけを保管しておき、任意の N×N をその場で組み立てる。
 
 ブラウザで動かす: https://uskey512.github.io/RubiksCube/viewer/
 
@@ -10,8 +10,8 @@ WebGL 表示用の、パーツ単位で回せるキューブモデル。
 
 | ファイル | 内容 |
 |---|---|
-| `dist/cube_NxN.gltf` | 配信用 glTF。パーツの並べ方だけを持つ JSON（50〜630 KB） |
-| `dist/cube_parts.bin` | 全サイズ共通のパーツ形状（本体 6 種・ステッカー 48 種、0.4 MB） |
+| `dist/cube_parts.gltf` | 部品集。本体 6 種・ステッカー 48 種（6 色 × 8）を 1 つずつ持つ glTF（42 KB + 形状 `cube_parts.bin` 0.4 MB） |
+| `viewer/build-cube.js` | 部品集から N×N を組み立てる three.js 用モジュール |
 | `textures/` | 全サイズ共通のテクスチャ（可逆 WebP、計 2.1 MB） |
 | `blend/cube_NxN.blend` | 編集用 Blender ファイル（テクスチャは `textures/` を参照） |
 | `previews/` | Cycles によるプレビュー画像（WebP） |
@@ -20,6 +20,8 @@ WebGL 表示用の、パーツ単位で回せるキューブモデル。
 | `scripts/` | モデル生成・プレビュー描画スクリプト |
 
 ## モデル構造
+
+`buildCube(parts, n)` が組み立てるノードの構成（`blend/cube_NxN.blend` のシーンも同じ）:
 
 ```
 Cube3x3                 extras: { size: 3, pitch: 1 }
@@ -33,20 +35,24 @@ Cube3x3                 extras: { size: 3, pitch: 1 }
 - 座標系は glTF 標準（+Y 上、+Z 手前）。単位は 1 パーツ = 1.0、キューブ中心が原点。
 - `Cubie_x_y_z` の添字は 0〜N-1 で、位置は `(添字 - (N-1)/2)`。x: L→R、y: D→U、z: B→F。
 - パーツは外から見える外殻だけ（3×3: 26、4×4: 56、5×5: 98、6×6: 152、10×10: 488、15×15: 1,178、20×20: 2,168）。
-- どのサイズも同じパーツ形状とテクスチャを使うので、`cube_NxN.gltf` は `cube_parts.bin` と `../textures/*.webp` を外部ファイルとして参照する。サイズごとに増えるのはノードの JSON だけで、全サイズ合わせても `dist/` と `textures/` で約 4 MB。
+- 角・縁・中央の違いは貼るステッカーの数（3・2・1 面）だけで、本体はどれも同じ形。どの本体とステッカーの種類を使うかはサイズを種にした乱数で決まり、同じサイズなら毎回同じになる。
+- 部品集とテクスチャ（計 2.5 MB）は最初に 1 回読むだけで、サイズの切り替えは組み立て直すだけ（20×20 で 20 ms 程度）。
 - 20×20 は約 170 万三角形。
 - 面と色: U 白 / D 黄 / F 緑 / B 青 / R 赤 / L 橙。
 - `stickers` は揃った状態での面の向き。回した後の実際の向きはノードの回転から求める。
-- three.js の `GLTFLoader` では extras が `object.userData` に入る。
+- 名前と `userData` は glTF の extras と同じ形で持つ。
 
 ## three.js でレイヤーを回す
 
 キューブ直下のパーツを、位置で選んでピボットに付け替えて回し、終わったら戻して格子に丸める。
 
 ```js
-const gltf = await new GLTFLoader().loadAsync('dist/cube_3x3.gltf');  // .bin とテクスチャも相対パスで読まれる
-const cube = gltf.scene.getObjectByName('Cube3x3');
-const cubies = cube.children.filter((o) => o.userData.grid);
+import { partsFrom, buildCube } from './viewer/build-cube.js';
+
+const parts = partsFrom(await new GLTFLoader().loadAsync('dist/cube_parts.gltf'));  // .bin とテクスチャも相対パスで読まれる
+const cube = buildCube(parts, 3);
+scene.add(cube);
+const cubies = [...cube.children];  // 回すと cube.children が入れ替わるのでコピーを持つ
 
 function turnLayer(axis, layer, quarter) {      // axis: 'x'|'y'|'z', layer: 0..N-1, quarter: ±1
   const coord = layer - (N - 1) / 2;
@@ -62,7 +68,7 @@ function turnLayer(axis, layer, quarter) {      // axis: 'x'|'y'|'z', layer: 0..
 
 丸め処理（`snap`）とアニメーションの完全な実装は `viewer/index.html` にある。回転を繰り返すと浮動小数の誤差がたまるので、毎回の丸めは必須。
 
-ビューアは、同じジオメトリとマテリアルを使うメッシュを `InstancedMesh` にまとめて描画している。glTF のノードは非表示のままシーンに残して上のように回し、動いたフレームだけワールド行列をインスタンスに写す。メッシュごとに描くと 20×20 で 4,568 draw calls になるところが、どのサイズでも 54 以下に収まる。
+ビューアは、同じジオメトリとマテリアルを使うメッシュを `InstancedMesh` にまとめて描画している。組み立てたノードは非表示のままシーンに残して上のように回し、動いたフレームだけワールド行列をインスタンスに写す。メッシュごとに描くと 20×20 で 4,568 draw calls になるところが、どのサイズでも 54 以下に収まる。
 
 GitHub Pages では main ブランチのルートをそのまま配信している（`.nojekyll` で Jekyll の変換を止め、ルートの `index.html` はビューアへ転送するだけ）。手元でのビューアの起動（リポジトリのルートで実行。three.js は CDN から読み込む）:
 
@@ -162,7 +168,7 @@ glTF 標準の PBR（metallic-roughness）で構成している。使ってい�
 blender -b --factory-startup -P scripts/build_cubes.py -- --sizes 3 4 5 6 10 15 20
 ```
 
-`dist/cube_parts.bin` と、指定したサイズの `.gltf`・`.blend` を書き出す。`--regen-textures` でテクスチャも作り直す。2 以上なら任意のサイズを指定できる。寸法・色・テクスチャの強さはスクリプト冒頭の定数と `generate_textures()` で調整する。
+部品集（`dist/cube_parts.gltf`・`.bin`）と、指定したサイズの `.blend` を書き出す。`--regen-textures` でテクスチャも作り直す。`.blend` は 2 以上の任意のサイズを指定できる（ビューアの組み立ては部品集だけで済む）。寸法・色・テクスチャの強さはスクリプト冒頭の定数と `generate_textures()` で調整する。
 
 プレビュー画像の再描画:
 

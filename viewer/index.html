@@ -48,6 +48,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { getModel, stickerIndex } from '../solver/cube.js';
+import { partsFrom, buildCube } from './build-cube.js';
 
 const SIZES = [3, 4, 5, 6, 10, 15, 20];
 const COLOR_IDS = { white: 0, red: 1, green: 2, yellow: 3, orange: 4, blue: 5 };
@@ -89,7 +90,7 @@ const maxAniso = renderer.capabilities.getMaxAnisotropy();
 const stats = document.getElementById('stats');
 const status = document.getElementById('status');
 const log = document.getElementById('log');
-let model = null, cube = null, cubies = [], size = 0, lastMove = null;
+let parts = null, cube = null, cubies = [], size = 0, lastMove = null;
 let instances = [], moved = true;
 let queue = Promise.resolve();
 let worker = null, solving = false, playClock = 0;
@@ -100,20 +101,26 @@ const enqueue = (fn) => (queue = queue.then(fn).catch((e) => {
   setSolving(false);
 }));
 
-async function load(n) {
-  stats.textContent = '読み込み中…';
-  const gltf = await loader.loadAsync(`../dist/cube_${n}x${n}.gltf`);
-  if (model) scene.remove(model);
-  model = gltf.scene;
-  cube = model.getObjectByName(`Cube${n}x${n}`);
-  cubies = cube.children.filter((o) => o.userData.grid);
-  model.traverse((o) => {
+async function loadParts() {
+  const gltf = await loader.loadAsync('../dist/cube_parts.gltf');
+  gltf.scene.traverse((o) => {
     if (!o.material) return;
     for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap']) {
       if (o.material[k]) o.material[k].anisotropy = maxAniso;
     }
   });
-  scene.add(model);
+  return partsFrom(gltf);
+}
+
+async function load(n) {
+  stats.textContent = '読み込み中…';
+  // The part library and its textures are fetched and decoded once; sizes only reassemble them.
+  parts ??= await loadParts();
+  if (cube) scene.remove(cube);
+  cube = buildCube(parts, n);
+  // A copy: turning a layer moves cubies in and out of cube.children.
+  cubies = [...cube.children];
+  scene.add(cube);
   buildInstances();
   size = n;
   lastMove = null;
