@@ -20,7 +20,9 @@ function check(solve, n, state, label) {
   }
 }
 
-const METHODS = [['computer', solveCube, [2, 3, 4, 5, 6]], ['human', solveHuman, [3, 4, 5, 6]]];
+const METHODS = [['computer', solveCube, [2, 3, 4, 5, 6, 10, 15]], ['human', solveHuman, [3, 4, 5, 6, 10, 15]]];
+// Big cubes take far longer per solve, so they get a twentieth of the random trials.
+const trialsFor = (n) => (n > 7 ? Math.max(1, Math.round(trials / 20)) : trials);
 
 for (const [method, solve, sizes] of METHODS) for (const n of sizes) {
   const model = getModel(n);
@@ -29,7 +31,7 @@ for (const [method, solve, sizes] of METHODS) for (const n of sizes) {
   for (const [label, ids] of fixed) check(solve, n, applyMoves(model, solvedState(n), ids), `${method} ${label}`);
 
   const results = [];
-  for (let t = 0; t < trials; t++) {
+  for (let t = 0; t < trialsFor(n); t++) {
     let s = solvedState(n);
     for (let i = 0; i < 30 * n; i++) s = applyMove(model, s, Math.floor(Math.random() * model.moveCount));
     const r = check(solve, n, s, `${method} random #${t}`);
@@ -40,7 +42,7 @@ for (const [method, solve, sizes] of METHODS) for (const n of sizes) {
   const stageNames = [...new Set(results.flatMap((r) => r.stages.map((s) => s.name)))];
   const perStage = (r, name) => r.stages.filter((s) => s.name === name).reduce((a, s) => a + s.moves, 0);
   const stageAvg = stageNames.map((name) => `${name} ${avg((r) => perStage(r, name))}`).join(', ');
-  console.log(`${method} ${n}x${n}: ${results.length}/${trials} solved, moves avg ${avg((r) => r.moves)} max ${Math.max(...results.map((r) => r.moves))} (${stageAvg}), ms avg ${avg((r) => r.ms)} max ${Math.max(...results.map((r) => r.ms)).toFixed(0)}`);
+  console.log(`${method} ${n}x${n}: ${results.length}/${trialsFor(n)} solved, moves avg ${avg((r) => r.moves)} max ${Math.max(...results.map((r) => r.moves))} (${stageAvg}), ms avg ${avg((r) => r.ms)} max ${Math.max(...results.map((r) => r.ms)).toFixed(0)}`);
 }
 console.log(failures ? `${failures} failure(s)` : 'all passed');
 process.exitCode = failures ? 1 : 0;

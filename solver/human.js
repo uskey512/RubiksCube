@@ -9,6 +9,8 @@
 // Where a person works intuitively (centers, edge pairing, the cross, the middle layer) the
 // solver searches a few moves ahead for the next piece. Elsewhere it applies a fixed algorithm,
 // held in whichever of the four orientations around U fits, as if turning the cube in hand.
+// Big cubes offer too many slice moves to try at every step, so above MAX_SLICE_SEARCH centers
+// and edges are placed with commutators instead, still face by face and edge by edge.
 
 import {
   getModel, encodeMove, decodeMove, invertMove, invertMoves, pushMove, applyMove, applyMoves, isSolved, compose,
@@ -61,6 +63,8 @@ function parseAlg(n, text, { map = IDENTITY, depths = innerDepths(n) } = {}) {
   }
   return ids;
 }
+
+const MAX_SLICE_SEARCH = 7;
 
 const ALGS = {
   firstLayerCorner: "R U R' U'",
@@ -181,49 +185,69 @@ function centerTools(model) {
   }
 
   // A slice, optionally followed by a face turn and the slice back, after an optional face turn.
-  const inner = [];
-  const outer = outerMoves(n);
-  for (let axis = 0; axis < 3; axis++) {
-    for (let layer = 1; layer < n - 1; layer++) for (const q of [1, -1, 2]) inner.push(encodeMove(n, axis, layer, q));
-  }
-  const cores = [];
-  for (const x of inner) {
-    const { axis, layer } = decodeMove(n, x);
-    const free = layer !== middle;
-    if (free) cores.push([x]);
-    for (const y of outer) {
-      if (decodeMove(n, y).axis === axis) continue;
-      if (free) cores.push([x, y]);
-      cores.push([x, y, invertMove(n, x)]);
-    }
-  }
   const macros = [];
-  for (const setup of [[], ...outer.map((id) => [id])]) {
-    for (const core of cores) macros.push(restrict(model, [...setup, ...core], slots));
+  if (n <= MAX_SLICE_SEARCH) {
+    const inner = [];
+    const outer = outerMoves(n);
+    for (let axis = 0; axis < 3; axis++) {
+      for (let layer = 1; layer < n - 1; layer++) for (const q of [1, -1, 2]) inner.push(encodeMove(n, axis, layer, q));
+    }
+    const cores = [];
+    for (const x of inner) {
+      const { axis, layer } = decodeMove(n, x);
+      const free = layer !== middle;
+      if (free) cores.push([x]);
+      for (const y of outer) {
+        if (decodeMove(n, y).axis === axis) continue;
+        if (free) cores.push([x, y]);
+        cores.push([x, y, invertMove(n, x)]);
+      }
+    }
+    for (const setup of [[], ...outer.map((id) => [id])]) {
+      for (const core of cores) macros.push(restrict(model, [...setup, ...core], slots));
+    }
   }
 
   // Commutators that cycle three center pieces and nothing else, for when slices would disturb solved faces.
   const slotOf = new Int16Array(size).fill(-1);
   slots.forEach((s, k) => (slotOf[s] = k));
   const cycles = [];
+  const orbitOfSlot = new Int16Array(slots.length);
+  const byOrbit = [];
   const { orbits, libraries } = getLibraries(model);
   orbits.forEach((orbit, i) => {
     if (orbit.kind !== 'center') return;
-    for (const { groups, moves } of libraries[i]) {
-      cycles.push({ moves, from: [groups[0], groups[2], groups[4]], to: [slotOf[groups[1]], slotOf[groups[3]], slotOf[groups[5]]] });
-    }
+    const list = libraries[i].map(({ groups, moves }) => ({
+      moves,
+      from: [groups[0], groups[2], groups[4]],
+      to: [slotOf[groups[1]], slotOf[groups[3]], slotOf[groups[5]]],
+    }));
+    for (const c of orbit.cubies) orbitOfSlot[slotOf[model.cubies[c].stickers[0]]] = byOrbit.length;
+    byOrbit.push(list);
+    cycles.push(...list);
   });
 
-  const tools = { slots, macros, cycles };
+  const tools = { slots, macros, cycles, byOrbit, orbitOfSlot };
   centerCache.set(n, tools);
   return tools;
 }
 
 function solveCenters(run, target) {
   const { model } = run;
-  const { slots, macros, cycles } = centerTools(model);
+  const { slots, macros, cycles, byOrbit, orbitOfSlot } = centerTools(model);
   const goal = Uint8Array.from(slots, (s) => target[s]);
   const role = new Uint8Array(slots.length); // 1: being solved, 2: solved earlier and must stay
+  // Gain on the face being solved, or null if a solved face would break.
+  const cycleGain = (st, { from, to }) => {
+    let gain = 0;
+    for (let j = 0; j < 3; j++) {
+      const k = to[j];
+      const right = st[from[j]] === goal[k];
+      if (role[k] === 2 && !right) return null;
+      if (role[k] === 1) gain += right - (st[slots[k]] === goal[k]);
+    }
+    return gain;
+  };
   for (const [name, faces] of CENTER_STAGES) {
     run.stage(name);
     const active = [];
@@ -237,8 +261,12 @@ function solveCenters(run, target) {
     for (;;) {
       const st = run.state;
       let have = 0;
-      for (const k of active) if (st[slots[k]] === goal[k]) have++;
-      if (have === active.length) break;
+      let wrong = -1;
+      for (const k of active) {
+        if (st[slots[k]] === goal[k]) have++;
+        else if (wrong < 0) wrong = k;
+      }
+      if (wrong < 0) break;
       const pick = chooser();
       for (const { moves, from } of macros) {
         let ok = true;
@@ -253,19 +281,24 @@ function solveCenters(run, target) {
         for (const k of active) if (st[from[k]] === goal[k]) after++;
         pick.consider(after - have, moves);
       }
-      for (const { moves, from, to } of cycles) {
-        let ok = true;
-        let gain = 0;
-        for (let j = 0; j < 3; j++) {
-          const k = to[j];
-          const right = st[from[j]] === goal[k];
-          if (role[k] === 2 && !right) {
-            ok = false;
-            break;
+      // Without slice moves, work on one orbit at a time, like a person filling in one kind of piece.
+      const pool = macros.length ? cycles : byOrbit[orbitOfSlot[wrong]];
+      for (const c of pool) {
+        const gain = cycleGain(st, c);
+        if (gain !== null) pick.consider(gain, c.moves);
+      }
+      // The library misses a few 3-cycles; when the one needed is among them, two cycles do the job.
+      if (!pick.best) {
+        for (const first of byOrbit[orbitOfSlot[wrong]]) {
+          const g1 = cycleGain(st, first);
+          if (g1 === null) continue;
+          const after = Uint8Array.from(st);
+          for (let j = 0; j < 3; j++) after[slots[first.to[j]]] = st[first.from[j]];
+          for (const second of byOrbit[orbitOfSlot[wrong]]) {
+            const g2 = cycleGain(after, second);
+            if (g2 !== null) pick.consider(g1 + g2, [...first.moves, ...second.moves]);
           }
-          if (role[k] === 1) gain += right - (st[slots[k]] === goal[k]);
         }
-        if (ok) pick.consider(gain, moves);
       }
       if (!pick.best) throw new Error(`${name}: no move makes progress`);
       run.play(pick.best.moves);
@@ -333,7 +366,7 @@ function pairingTools(model) {
   for (let i = 0; i < size; i++) if (model.cubies[model.cubieOf[i]].type === 'center') centerStickers.push(i);
   const cores = [];
   const seen = new Set();
-  for (let axis = 0; axis < 3; axis++) {
+  for (let axis = 0; axis < 3 && n <= MAX_SLICE_SEARCH; axis++) {
     for (let layer = 1; layer < n - 1; layer++) {
       if (layer === middle) continue;
       for (const q of [1, -1]) {
@@ -360,7 +393,7 @@ function pairingTools(model) {
   const wingOrbits = [];
   orbits.forEach((orbit, i) => {
     if (orbit.kind !== 'wing') return;
-    for (const { groups, moves } of libraries[i]) {
+    for (const { groups, moves } of n <= MAX_SLICE_SEARCH ? libraries[i] : []) {
       const from = [];
       const to = [];
       for (let j = 0; j < groups.length; j += 2) {
@@ -484,23 +517,25 @@ function pairEdges(run, target) {
     const paired = pairedCount(edges, col, odd);
     if (paired === all) return;
 
-    const pick = chooser();
-    for (const { moves, from } of macros) {
-      for (let k = 0; k < slots.length; k++) next[k] = st[from[k]];
-      pick.consider(pairedCount(edges, next, odd) - paired, moves);
-    }
-    for (const { moves, from, to } of cycles) {
-      next.set(col);
-      for (let j = 0; j < to.length; j++) next[to[j]] = st[from[j]];
-      pick.consider(pairedCount(edges, next, odd) - paired, moves);
-    }
-    if (pick.best) {
-      run.play(pick.best.moves);
-      continue;
+    if (macros.length) {
+      const pick = chooser();
+      for (const { moves, from } of macros) {
+        for (let k = 0; k < slots.length; k++) next[k] = st[from[k]];
+        pick.consider(pairedCount(edges, next, odd) - paired, moves);
+      }
+      for (const { moves, from, to } of cycles) {
+        next.set(col);
+        for (let j = 0; j < to.length; j++) next[to[j]] = st[from[j]];
+        pick.consider(pairedCount(edges, next, odd) - paired, moves);
+      }
+      if (pick.best) {
+        run.play(pick.best.moves);
+        continue;
+      }
     }
 
-    // Stuck on the last few edges. A wing layer an odd permutation away from any pairing needs
-    // the parity algorithm; otherwise commutators finish the job.
+    // Stuck on the last few edges, or a big cube. A wing layer an odd permutation away from any
+    // pairing needs the parity algorithm; otherwise commutators finish the job.
     const goal = pairingTarget(tools, st, colorPairs, odd);
     const flips = tools.wingOrbits.filter((o) => wingParity(o, st, goal));
     if (!flips.length) {

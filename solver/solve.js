@@ -6,7 +6,7 @@
 // every one is verified by simulation, so solving an orbit only ever moves that orbit.
 
 import {
-  getModel, encodeMove, decodeMove, invertMove, invertMoves, pushMove, applyMove, applyMoves, isSolved, compose,
+  getModel, encodeMove, decodeMove, invertMove, invertMoves, pushMove, applyMove, applyMoves, isSolved,
 } from './cube.js';
 import { solve3x3, cubieFromFacelets, permParity } from './kociemba.js';
 
@@ -72,24 +72,29 @@ function candidateCommutators(model) {
   return seqs;
 }
 
-function setupSequences(model) {
-  const { n, moveCount } = model;
-  const seqs = [[]];
-  for (let a = 0; a < moveCount; a++) seqs.push([a]);
-  for (let a = 0; a < moveCount; a++) {
-    const ma = decodeMove(n, a);
-    for (let b = 0; b < moveCount; b++) {
-      const mb = decodeMove(n, b);
-      if (ma.axis === mb.axis && mb.layer <= ma.layer) continue;
-      seqs.push([a, b]);
+// The stickers each move actually moves.
+function moveSupports(model) {
+  return model.perms.map((perm) => {
+    const moved = [];
+    for (let i = 0; i < perm.length; i++) if (perm[i] !== i) moved.push(i);
+    return Int32Array.from(moved);
+  });
+}
+
+// (from, to) pairs of the stickers a sequence moves. Only stickers one of its moves touches can
+// move, so following just those is much cheaper than composing the whole cube on big sizes.
+function movedPairs(model, seq, supports, mark, stamp) {
+  const pairs = [];
+  for (const id of seq) {
+    for (const s of supports[id]) {
+      if (mark[s] === stamp) continue;
+      mark[s] = stamp;
+      let p = s;
+      for (const m of seq) p = model.perms[m][p];
+      if (p !== s) pairs.push(s, p);
     }
   }
-  return seqs.map((moves) => {
-    const comp = compose(model, moves);
-    const inv = new Int32Array(comp.length);
-    for (let i = 0; i < comp.length; i++) inv[comp[i]] = i;
-    return { moves, inv };
-  });
+  return pairs;
 }
 
 // A 3-cycle given as (from, to) sticker pairs, grouped by destination cubie.
@@ -109,21 +114,108 @@ function cycleEntry(model, pairs, moves) {
 
 const libraryCache = new Map();
 
+// Every 3-cycle of one orbit that a base commutator conjugated by up to two moves reaches,
+// keeping the shortest for each. Moves that leave the orbit alone add nothing as setups, and
+// setups that act on the orbit the same way are tried once.
+function orbitLibrary(model, orbit, bases, supports) {
+  const { n, cubieOf } = model;
+  const k = orbit.cubies.length;
+  const local = new Int32Array(model.cubies.length).fill(-1);
+  orbit.cubies.forEach((c, j) => (local[c] = j));
+  const stickers = orbit.cubies.flatMap((c) => model.cubies[c].stickers);
+  const stickerIndex = new Int32Array(model.size).fill(-1);
+  stickers.forEach((s, j) => (stickerIndex[s] = j));
+  const relevant = [];
+  for (let id = 0; id < model.moveCount; id++) if (supports[id].some((s) => stickerIndex[s] >= 0)) relevant.push(id);
+
+  // inv[j] is the sticker the setup carries onto stickers[j].
+  const setups = [];
+  const seen = new Set();
+  const addSetup = (moves) => {
+    const inv = new Int32Array(stickers.length);
+    for (const s of stickers) {
+      let p = s;
+      for (const id of moves) p = model.perms[id][p];
+      inv[stickerIndex[p]] = s;
+    }
+    const key = inv.join();
+    if (seen.has(key)) return;
+    seen.add(key);
+    setups.push({ moves, inv });
+  };
+  addSetup([]);
+  for (const a of relevant) addSetup([a]);
+  for (const a of relevant) {
+    const ma = decodeMove(n, a);
+    for (const b of relevant) {
+      const mb = decodeMove(n, b);
+      if (ma.axis === mb.axis && mb.layer <= ma.layer) continue;
+      addSetup([a, b]);
+    }
+  }
+
+  const baseList = [...bases.values()].map((b) => {
+    const per = b.groups.length / 3;
+    return { ...b, dest: [0, 1, 2].map((j) => stickerIndex[b.groups[j * per + 1]]) };
+  });
+  const complete = (k * (k - 1) * (k - 2)) / 3;
+  const NONE = 1 << 30;
+  const bestLength = new Int32Array(k * k * k).fill(NONE);
+  const bestSetup = new Int32Array(k * k * k);
+  const bestBase = new Int32Array(k * k * k);
+  let found = 0;
+  let level = 0;
+  for (let si = 0; si < setups.length; si++) {
+    const { moves, inv } = setups[si];
+    if (moves.length > level) {
+      if (found === complete) break;
+      level = moves.length;
+    }
+    for (let bi = 0; bi < baseList.length; bi++) {
+      const { dest, moves: baseMoves } = baseList[bi];
+      // Conjugation keeps the cycle order of the destination cubies, so the key needs no regrouping.
+      const a = local[cubieOf[inv[dest[0]]]];
+      const b = local[cubieOf[inv[dest[1]]]];
+      const c = local[cubieOf[inv[dest[2]]]];
+      const key = a < b && a < c ? (a * k + b) * k + c : b < c ? (b * k + c) * k + a : (c * k + a) * k + b;
+      const length = baseMoves.length + 2 * moves.length;
+      if (bestLength[key] <= length) continue;
+      if (bestLength[key] === NONE) found++;
+      bestLength[key] = length;
+      bestSetup[key] = si;
+      bestBase[key] = bi;
+    }
+  }
+
+  const entries = [];
+  for (let key = 0; key < bestLength.length; key++) {
+    if (bestLength[key] === NONE) continue;
+    const { moves, inv } = setups[bestSetup[key]];
+    const base = baseList[bestBase[key]];
+    entries.push({
+      groups: base.groups.map((s) => inv[stickerIndex[s]]),
+      moves: [...moves, ...base.moves, ...invertMoves(n, moves)],
+    });
+  }
+  return entries;
+}
+
 export function getLibraries(model) {
   if (libraryCache.has(model.n)) return libraryCache.get(model.n);
   const orbits = findOrbits(model);
-  const orbitOf = new Map();
-  orbits.forEach((o, i) => o.cubies.forEach((c) => orbitOf.set(c, i)));
+  const orbitOf = new Int32Array(model.cubies.length);
+  orbits.forEach((o, i) => o.cubies.forEach((c) => (orbitOf[c] = i)));
+  const supports = moveSupports(model);
+  const mark = new Int32Array(model.size);
+  let stamp = 0;
 
   const bases = orbits.map(() => new Map());
   for (const seq of candidateCommutators(model)) {
-    const comp = compose(model, seq);
-    const pairs = [];
-    for (let i = 0; i < comp.length; i++) if (comp[i] !== i) pairs.push(i, comp[i]);
+    const pairs = movedPairs(model, seq, supports, mark, ++stamp);
     const cubies = new Set();
     for (let k = 0; k < pairs.length; k += 2) cubies.add(model.cubieOf[pairs[k]]);
     if (cubies.size !== 3) continue;
-    const orbitIds = new Set([...cubies].map((c) => orbitOf.get(c)));
+    const orbitIds = new Set([...cubies].map((c) => orbitOf[c]));
     if (orbitIds.size !== 1) continue;
     const orbit = [...orbitIds][0];
     if (orbits[orbit].kind === 'core') continue;
@@ -135,38 +227,7 @@ export function getLibraries(model) {
     }
   }
 
-  const setups = setupSequences(model);
-  const libraries = orbits.map((orbit, i) => {
-    if (orbit.kind === 'core') return null;
-    const k = orbit.cubies.length;
-    const complete = (k * (k - 1) * (k - 2)) / 3;
-    const lib = new Map();
-    const baseList = [...bases[i].values()].map((b) => {
-      const per = b.groups.length / 3;
-      return { ...b, dest: [b.groups[1], b.groups[per + 1], b.groups[2 * per + 1]] };
-    });
-    let level = 0;
-    for (const setup of setups) {
-      if (setup.moves.length > level) {
-        if (lib.size === complete) break;
-        level = setup.moves.length;
-      }
-      for (const base of baseList) {
-        // Conjugation keeps the cycle order of the destination cubies, so the key needs no regrouping.
-        const m = base.dest.map((s) => model.cubieOf[setup.inv[s]]);
-        const r = m.indexOf(Math.min(...m));
-        const key = (m[r] * 4096 + m[(r + 1) % 3]) * 4096 + m[(r + 2) % 3];
-        const length = base.moves.length + 2 * setup.moves.length;
-        const prev = lib.get(key);
-        if (prev && prev.length <= length) continue;
-        lib.set(key, { setup, base, length });
-      }
-    }
-    return [...lib.values()].map(({ setup, base }) => ({
-      groups: base.groups.map((s) => setup.inv[s]),
-      moves: [...setup.moves, ...base.moves, ...invertMoves(model.n, setup.moves)],
-    }));
-  });
+  const libraries = orbits.map((orbit, i) => (orbit.kind === 'core' ? null : orbitLibrary(model, orbit, bases[i], supports)));
 
   const result = { orbits, libraries };
   libraryCache.set(model.n, result);
